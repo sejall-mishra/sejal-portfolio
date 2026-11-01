@@ -1,9 +1,9 @@
 import os
 import sqlite3
-import smtplib
-from email.mime.text import MIMEText
 from datetime import datetime
 from functools import wraps
+
+import requests
 from dotenv import load_dotenv
 from flask import (
     Flask, render_template, request, redirect, url_for,
@@ -21,12 +21,15 @@ RESUME_DIR = os.path.join(BASE_DIR, "static", "files")
 RESUME_FILENAME = "Sejal_Mishra_Resume.pdf"
 PROFILE_PHOTO_PATH = os.path.join(BASE_DIR, "static", "images", "profile.jpg")
 
-GMAIL_USER = os.environ.get("GMAIL_USER")
-GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD")
+# Email (Resend HTTP API - works on Render, unlike SMTP)
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
+OWNER_EMAIL = os.environ.get("OWNER_EMAIL")
+
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "changeme")
 
 
 def init_db():
+    """Creates the messages table if it does not exist."""
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS messages (
@@ -61,9 +64,9 @@ PROFILE = {
 }
 
 SKILLS = {
-    "Languages & Web": ["Python", "PHP", "HTML", "CSS", "JavaScript"],
+    "Languages & Web": ["Python", "PHP", "HTML", "CSS"],
     "Database": ["MySQL", "SQLite", "SQL"],
-    "Tools": ["Git", "GitHub", "XAMPP"],
+    "Tools": ["Git", "GitHub"],
 }
 
 EDUCATION = [
@@ -112,27 +115,37 @@ def inject_globals():
 
 
 def send_email_notification(name, sender_email, message):
-    if not GMAIL_USER or not GMAIL_APP_PASSWORD:
-        print("⚠️ Email not configured — skipping email send.")
+    """
+    Sends the contact message to the owner using Resend's HTTP API.
+    Returns True on success, False on failure. Never crashes the request.
+    """
+    if not RESEND_API_KEY or not OWNER_EMAIL:
+        print("⚠️ Email not configured (RESEND_API_KEY or OWNER_EMAIL missing).")
         return False
-    try:
-        body = (
-            f"New message from your portfolio contact form:\n\n"
-            f"Name: {name}\n"
-            f"Email: {sender_email}\n"
-            f"Message:\n{message}\n"
-        )
-        msg = MIMEText(body)
-        msg["Subject"] = f"Portfolio Contact: {name}"
-        msg["From"] = GMAIL_USER
-        msg["To"] = GMAIL_USER
-        msg["Reply-To"] = sender_email
 
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-            server.sendmail(GMAIL_USER, GMAIL_USER, msg.as_string())
+    body = (
+        f"New message from your portfolio contact form:\n\n"
+        f"Name: {name}\n"
+        f"Email: {sender_email}\n"
+        f"Message:\n{message}\n"
+    )
+
+    try:
+        response = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+            json={
+                "from": "Portfolio <onboarding@resend.dev>",
+                "to": [OWNER_EMAIL],
+                "reply_to": sender_email,
+                "subject": f"Portfolio Contact: {name}",
+                "text": body,
+            },
+            timeout=10,  # 10 second mein response na aaye to ruk jao
+        )
+        response.raise_for_status()
         return True
-    except Exception as e:
+    except requests.RequestException as e:
         print(f"❌ Email send failed: {e}")
         return False
 
@@ -167,6 +180,7 @@ def contact():
         flash("Please fill in all fields.", "error")
         return redirect(url_for("home") + "#contact")
 
+    # 1. Pehle database mein save karo (ye kabhi fail nahi hona chahiye)
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
         "INSERT INTO messages (name, email, message, created_at) VALUES (?, ?, ?, ?)",
@@ -175,8 +189,10 @@ def contact():
     conn.commit()
     conn.close()
 
+    # 2. Email bhejne ki koshish karo (fail hone par bhi site crash nahi hogi)
     send_email_notification(name, email, message)
 
+    # 3. User ko response
     flash("Thanks for reaching out! I'll get back to you soon.", "success")
     return redirect(url_for("home") + "#contact")
 
